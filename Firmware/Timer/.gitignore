@@ -1,0 +1,11 @@
+Debug
+Debug2
+Release
+*.opensdf
+*.sdf
+*.suo
+*.old
+VisualGDBCache
+CodeDB
+sdkconfig
+build
