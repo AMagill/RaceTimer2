@@ -1,5 +1,6 @@
 #include "SSD1306.h"
 #include <cstdarg>
+#include <string.h>
 
 static const uint8_t LCD_WIDTH              = 128;
 static const uint8_t LCD_HEIGHT             = 32;
@@ -37,8 +38,11 @@ void SSD1306::Init()
 	conf.master.clk_speed = 1000000;
 	i2c_param_config(m_i2cPort, &conf);
 	i2c_driver_install(m_i2cPort, conf.mode, 0, 0, 0);
-	
-	
+}
+
+
+void SSD1306::PowerOn()
+{
 	SendCommand(CMD_DISPLAYOFF);
 	
 	SendCommand(CMD_SETDISPLAYCLOCKDIV);
@@ -48,10 +52,10 @@ void SSD1306::Init()
 	SendCommand(LCD_HEIGHT - 1);
 
 	SendCommand(CMD_CHARGEPUMP);
-	SendCommand(0x14); // Enable = 1
+	SendCommand(0x14);  // Enable = 1
 	
 	SendCommand(CMD_MEMORYMODE);
-	SendCommand(0x00); // Horizontal mode
+	SendCommand(0x00);  // Horizontal mode
 	
 	SendCommand(CMD_SEGREMAP | 0x01);
 	
@@ -70,6 +74,15 @@ void SSD1306::Init()
 	SendCommand(0x40);
 		
 	SendCommand(CMD_DISPLAYON);
+}
+
+
+void SSD1306::PowerOff()
+{
+	SendCommand(CMD_DISPLAYOFF);
+	
+	SendCommand(CMD_CHARGEPUMP);
+	SendCommand(0x10);  // Enable = 0
 }
 
 
@@ -136,9 +149,10 @@ void SSD1306::SetCursor(int a_x, int a_y)
 }
 
 
-void SSD1306::SetFont(const FONT_INFO* a_font)
+void SSD1306::SetFont(const FONT_INFO* a_font, int a_spacing)
 {
 	m_curFont = a_font;
+	m_spacing = a_spacing;
 }
 
 
@@ -173,7 +187,7 @@ void SSD1306::DrawChar(char a_char)
 		}
 	}
 	
-	m_curX += charInfo.widthBits + 1;
+	m_curX += charInfo.widthBits + m_spacing;
 }
 
 void SSD1306::Print(const char* a_format)
@@ -192,4 +206,9 @@ void SSD1306::Printf(const char* a_format, ...)
 	va_end(argptr);
 	
 	Print(buf);
+}
+
+void SSD1306::DrawScreen(const uint8_t* a_bitmap)
+{
+	memcpy(m_frameBuf.data(), a_bitmap, LCD_WIDTH*LCD_HEIGHT / 8);
 }

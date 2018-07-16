@@ -7,31 +7,19 @@
 #include "esp_log.h"
 #include "tcpip_adapter.h"
 #include "Protocol.h"
+#include "main.h"
 
-static const char *TAG = "EspNow";
-static const uint8_t BROADCAST_MAC[ESP_NOW_ETH_ALEN] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+static void sendCB(const uint8_t *a_macAddr, esp_now_send_status_t a_status);
+static void recvCB(const uint8_t *a_macAddr, const uint8_t *a_data, int a_length);
+	
+static QueueHandle_t     g_eventQueue;
+static SemaphoreHandle_t g_sendSemaphore;
+static uint32_t          g_lastRxRtcTime = 0;
 
-static SemaphoreHandle_t sendSemaphore;
 
-struct airMessage_t
+void Protocol::Init(QueueHandle_t a_queue, const uint8_t a_otherMac[6])
 {
-	char     magic[4] = {'R', 'a', 'c', 'e'};
-	uint32_t timeMS;
-	bool     isEcho;
-};
-
-
-//    buf->crc = crc16_le(UINT16_MAX, (uint8_t const *)buf, send_param->len);
-
-
-Protocol::Protocol()
-{
-}
-
-
-void Protocol::Init(ProtocolRxCB_t* a_rxCB)
-{
-	m_rxCallback = a_rxCB;
+	g_eventQueue = a_queue;
 	
 	tcpip_adapter_init();
 	wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
@@ -55,59 +43,63 @@ void Protocol::Init(ProtocolRxCB_t* a_rxCB)
 	peer.channel = CONFIG_ESPNOW_CHANNEL;
 	peer.ifidx   = ESP_IF_WIFI_STA;
 	peer.encrypt = false;
-	memcpy(peer.peer_addr, BROADCAST_MAC, ESP_NOW_ETH_ALEN);
+	memcpy(peer.peer_addr, a_otherMac, ESP_NOW_ETH_ALEN);
 	ESP_ERROR_CHECK(esp_now_add_peer(&peer));
 
-	sendSemaphore = xSemaphoreCreateBinary();
-	xSemaphoreGive(sendSemaphore);
+	g_sendSemaphore = xSemaphoreCreateBinary();
+	xSemaphoreGive(g_sendSemaphore);
 }
 
 
-int32_t Protocol::Send()
+void Protocol::Send(uint32_t a_stateTime, uint8_t a_stateFlag)
 {
-	airMessage_t msg;
-	msg.timeMS = esp_timer_get_time() / 1000;
+	Message_t msg;
+	msg.rtcTimeMS   = esp_timer_get_time() / 1000;
+	msg.ackTimeMS   = g_lastRxRtcTime;
+	msg.stateTimeMS = a_stateTime;
+	msg.stateFlag   = a_stateFlag;
 	
-	xSemaphoreTake(sendSemaphore, portMAX_DELAY);
-	ESP_ERROR_CHECK(esp_now_send(BROADCAST_MAC, reinterpret_cast<uint8_t*>(&msg), sizeof(msg)));
-	
-	return msg.timeMS;
+	xSemaphoreTake(g_sendSemaphore, portMAX_DELAY);
+	ESP_ERROR_CHECK(esp_now_send(nullptr, reinterpret_cast<uint8_t*>(&msg), sizeof(msg)));
 }
 
 
-void Protocol::sendCB(const uint8_t *a_macAddr, esp_now_send_status_t a_status)
+void sendCB(const uint8_t *a_macAddr, esp_now_send_status_t a_status)
 {
-	xSemaphoreGive(sendSemaphore);   // Allow another send
+	xSemaphoreGive(g_sendSemaphore);   // Allow another send
 }
 
 
-void Protocol::recvCB(const uint8_t *a_macAddr, const uint8_t *a_data, int a_length)
+void recvCB(const uint8_t *a_macAddr, const uint8_t *a_data, int a_length)
 {
 	if (a_macAddr == NULL || a_data == NULL || a_length <= 0) 
 	{
-		ESP_LOGE(TAG, "Receive cb arg error");
+		ESP_LOGE("Protocol", "Receive cb arg error");
 		return;
 	}
 
-	if (a_length != sizeof(airMessage_t))
+	if (a_length != sizeof(Protocol::Message_t))
 		return;
 	
-	const airMessage_t* airMsg = reinterpret_cast<const airMessage_t*>(a_data);
-	if (strncmp(airMsg->magic, "Race", 4) != 0)
-		return;
-		
-	// If it's not an echo, then echo it back
-	if(!airMsg->isEcho)
+	const Protocol::Message_t* msg = reinterpret_cast<const Protocol::Message_t*>(a_data);	
+	g_lastRxRtcTime = msg->rtcTimeMS;
+	
 	{
-		airMessage_t response = *airMsg;
-		response.isEcho = true;
-		xSemaphoreTake(sendSemaphore, portMAX_DELAY);
-		ESP_ERROR_CHECK(esp_now_send(BROADCAST_MAC, reinterpret_cast<uint8_t*>(&response), sizeof(response)));
+		Event_t event;
+		event.type = EventType::RX_RTC;
+		event.time = msg->rtcTimeMS;
+		xQueueSend(g_eventQueue, &event, portMAX_DELAY);	
 	}
-
-	Message_t msg;
-	msg.rxTimeMS = esp_timer_get_time() / 1000;
-	msg.timeMS   = airMsg->timeMS;
-	msg.isEcho   = airMsg->isEcho;
-	GetSingle().m_rxCallback(msg);
+	{	
+		Event_t event;
+		event.type = EventType::RX_ACK;
+		event.time = msg->ackTimeMS;
+		xQueueSend(g_eventQueue, &event, portMAX_DELAY);	
+	}
+	{	
+		Event_t event;
+		event.type = msg->stateFlag ? EventType::RX_BUTTON_DOWN : EventType::RX_BUTTON_UP;
+		event.time = msg->stateTimeMS;
+		xQueueSend(g_eventQueue, &event, portMAX_DELAY);	
+	}
 }

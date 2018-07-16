@@ -1,35 +1,19 @@
 #pragma once
 #include "esp_now.h"
+#include <memory>
+#include "freertos/queue.h"
 
 
-class Protocol
+namespace Protocol
 {
-public:
 	struct Message_t
 	{
-		uint32_t timeMS;
-		bool     isEcho;
-		uint32_t rxTimeMS;
+		uint32_t rtcTimeMS;   // Current RTC time
+		uint32_t ackTimeMS;   // Last RTC time received from other device
+		uint32_t stateTimeMS; // From master: timer value,    from slave: button transition time
+		uint8_t  stateFlag;   // From master: timmer running, from slave: button down
 	};
 
-	using ProtocolRxCB_t = void(const Message_t a_msg);
-
-	static Protocol& GetSingle()
-	{
-		static Protocol instance;
-		return instance;
-	}
-	
-	void Init(ProtocolRxCB_t* a_rxCB);
-	int32_t Send();
-	
-private:
-	Protocol();  // Private constructor
-	Protocol(const Protocol&)       = delete;  // No copy
-	void operator=(const Protocol&) = delete;  // No copy
-	
-	static void sendCB(const uint8_t *a_macAddr, esp_now_send_status_t a_status);
-	static void recvCB(const uint8_t *a_macAddr, const uint8_t *a_data, int a_length);
-	
-	ProtocolRxCB_t* m_rxCallback;
-};
+	void Init(QueueHandle_t a_queue, const uint8_t a_otherMac[6]);
+	void Send(uint32_t a_stateTime, uint8_t a_stateFlag);
+}
