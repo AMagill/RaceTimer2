@@ -116,23 +116,14 @@ void SSD1306::SendFrame()
 	SendCommand(0);              // Page start address
 	SendCommand(3);              // Page end   address
 	
-	for (uint16_t i=0; i<(LCD_WIDTH*LCD_HEIGHT/8); i++) 
-	{
-		i2c_cmd_handle_t cmd = i2c_cmd_link_create();
-		i2c_master_start(cmd);
-		i2c_master_write_byte(cmd, I2C_ADDR | I2C_MASTER_WRITE, true);
-		i2c_master_write_byte(cmd, 0x40, true);   // Continuation = 0, Data/#Command = 1
-		for (uint8_t x=0; x<16; x++) 
-		{
-			i2c_master_write_byte(cmd, m_frameBuf[i], true);
-			i++;
-		}
-		i--;
-		i2c_master_stop(cmd);
-		i2c_master_cmd_begin(m_i2cPort, cmd, 1000 / portTICK_RATE_MS);
-		i2c_cmd_link_delete(cmd);
-	}
-
+	i2c_cmd_handle_t cmd = i2c_cmd_link_create();
+	i2c_master_start(cmd);
+	i2c_master_write_byte(cmd, I2C_ADDR | I2C_MASTER_WRITE, true);
+	i2c_master_write_byte(cmd, 0x40, true);   // Continuation = 0, Data/#Command = 1
+	i2c_master_write(cmd, m_frameBuf.data(), LCD_WIDTH*LCD_HEIGHT / 8, true);
+	i2c_master_stop(cmd);
+	i2c_master_cmd_begin(m_i2cPort, cmd, 1000 / portTICK_RATE_MS);
+	i2c_cmd_link_delete(cmd);
 }
 
 

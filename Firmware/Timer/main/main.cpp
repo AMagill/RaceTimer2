@@ -28,13 +28,14 @@
 
 static const uint8_t MASTER_MAC[6] = { 0x30, 0xAE, 0xA4, 0x1C, 0x0C, 0xB8 };  // I  - Red   button
 static const uint8_t SLAVE_MAC[6]  = { 0x30, 0xAE, 0xA4, 0x23, 0xCC, 0x10 };  // II - Green button
-static const TickType_t REFRESH_IDLE_TICKS   = 100 / portTICK_PERIOD_MS;
-static const TickType_t REFRESH_ACTIVE_TICKS = 10  / portTICK_PERIOD_MS;
+static const TickType_t DISPLAY_IDLE_TICKS   = 100 / portTICK_PERIOD_MS;
+static const TickType_t DISPLAY_ACTIVE_TICKS = 31  / portTICK_PERIOD_MS;
 static const TickType_t SEND_TICKS           = 100 / portTICK_PERIOD_MS;
 
 TaskHandle_t  mainTask;
 QueueHandle_t eventQueue;
 TimerHandle_t sendTimer;
+TimerHandle_t displayTimer;
 
 
 static void onSendTimer(TimerHandle_t a_timer)
@@ -44,6 +45,12 @@ static void onSendTimer(TimerHandle_t a_timer)
 	xQueueSend(eventQueue, &event, portMAX_DELAY);
 }
 
+static void onDisplayTimer(TimerHandle_t a_timer)
+{
+	Event_t event;
+	event.type = EventType::TIMER_DISPLAY;
+	xQueueSend(eventQueue, &event, portMAX_DELAY);
+}
 
 
 static void taskMain(void* a_context)
@@ -93,150 +100,163 @@ static void taskMain(void* a_context)
 	Battery::Init();
 	
 	// Main loop
-	while (true)
+	Event_t event;
+	while (xQueueReceive(eventQueue, &event, portMAX_DELAY))
 	{
-		Event_t event;
-		bool gotMessage = xQueueReceive(eventQueue, &event, timerRunning ? REFRESH_ACTIVE_TICKS : REFRESH_IDLE_TICKS);
+		bool lastTimerRunning = timerRunning;
 		uint32_t now = esp_timer_get_time() / 1000;
-
-		if (gotMessage)
+		
+		switch (event.type)
 		{
-			switch (event.type)
+		case EventType::RX_RTC:
+			clockSkew = now - event.time;
+			if (lastRxStateTimeMS > event.time) // Our timestamp for green's last button event is in green's future.  It probably restarted.
+				lastRxStateTimeMS = 0;
+			break;
+		case EventType::RX_ACK:
+			signalEstimate.Push(event.time);
+			break;
+		case EventType::RX_BUTTON_DOWN:
+			if (isMaster)
 			{
-			case EventType::RX_RTC:
-				clockSkew = now - event.time;
-				if (lastRxStateTimeMS > event.time) // Our timestamp for green's last button event is in green's future.  It probably restarted.
-					lastRxStateTimeMS = 0;
-				break;
-			case EventType::RX_ACK:
-				signalEstimate.Push(event.time);
-				break;
-			case EventType::RX_BUTTON_DOWN:
-				if(isMaster)
+				if (lastRxStateTimeMS != 0 && event.time > lastRxStateTimeMS)
 				{
-					if (lastRxStateTimeMS != 0 && event.time > lastRxStateTimeMS)
-					{ // The green button's state changed to DOWN.  (First message doesn't count)
-						timerRunning = false;
-						timerValueMS = 0;
-						lastEventTimeMS = now;
-					}
-					lastRxStateTimeMS = event.time;
+					 // The green button's state changed to DOWN.  (First message doesn't count)
+					timerRunning = false;
+					timerValueMS = 0;
+					lastEventTimeMS = now;
 				}
-				else  // Slave
+				lastRxStateTimeMS = event.time;
+			}
+			else  // Slave
 				{
 					timerRunning = true;
 					timerValueMS = event.time + clockSkew;
 				}
-				break;
-			case EventType::RX_BUTTON_UP:
-				if (isMaster)
+			break;
+		case EventType::RX_BUTTON_UP:
+			if (isMaster)
+			{
+				if (lastRxStateTimeMS != 0 && event.time > lastRxStateTimeMS)
 				{
-					if (lastRxStateTimeMS != 0 && event.time > lastRxStateTimeMS)
-					{ // The green button's state changed to UP.  (First message doesn't count)
-						timerRunning = true;
-						timerValueMS = now;
-						lastEventTimeMS = now;
-					}
-					lastRxStateTimeMS = event.time;
+					 // The green button's state changed to UP.  (First message doesn't count)
+					timerRunning = true;
+					timerValueMS = now;
+					lastEventTimeMS = now;
 				}
-				else  // Slave
+				lastRxStateTimeMS = event.time;
+			}
+			else  // Slave
 				{
 					if (timerRunning)
 						lastEventTimeMS = now;
 					timerRunning = false;
 					timerValueMS = event.time;
 				}
-				break;
-			case EventType::BUTTON_DOWN:
-				lastEventTimeMS = now;
-				buttonDown   = true;
-				buttonTimeMS = event.time;  // Not 'now', because the debounce algorithm can send events from the past
-				if (isMaster && timerRunning)  // Press down stops
-				{
-					timerRunning = false;
-					timerValueMS = buttonTimeMS - timerValueMS;
-				}
-				break;
-			case EventType::BUTTON_UP:
-				lastEventTimeMS = now;
-				buttonDown   = false;
-				buttonTimeMS = event.time;  // Not 'now', because the debounce algorithm can send events from the past
-				break;
-			case EventType::TIMER_SEND:
-				if (isMaster)
-					Protocol::Send(timerValueMS, timerRunning);
-				else
-					Protocol::Send(buttonTimeMS, buttonDown);
-				break;
+			break;
+		case EventType::BUTTON_DOWN:
+			ESP_LOGI("Main", "Button down");
+			lastEventTimeMS = now;
+			buttonDown   = true;
+			buttonTimeMS = event.time;   // Not 'now', because the debounce algorithm can send events from the past
+			if(isMaster && timerRunning)  // Press down stops
+			{
+				timerRunning = false;
+				timerValueMS = buttonTimeMS - timerValueMS;
 			}
-		}
-
-		const int totalMS     = timerRunning ? (now - timerValueMS) : timerValueMS;
-		const int min         = (totalMS / 60000) % 100;
-		const int sec         = (totalMS / 1000)  % 60;
-		const int cs          = (totalMS / 10)    % 100;  // centiseconds
-		const int battery     = Battery::GetScaled(8);
-		const int signal      = signalEstimate.GetScaled(now, 5);
-		const int idleTimeSec = (now - lastEventTimeMS) / 1000;
-		const int idleTimeRemaining = (timerRunning ? 3600 : 600) - idleTimeSec - 1;
-		
-		bool drawStatusIcons = true;
-		oled.Clear();
-		if (now < 2000)
-		{
-			drawStatusIcons = false;
-			oled.DrawScreen(splashScreenBitmap);
-		}
-		else if (signal == 0 && now%1000 > 500)
-		{
-			oled.SetFont(&openSansCondensed_11ptFontInfo, 1);
-			oled.SetCursor(32, 1);
-			oled.Print("Not connected!");
-		}
-		else if (min > 9)   // 00:00.00
-		{
-			drawStatusIcons = false;  // Not enough room!
-			oled.SetFont(&openSansCondensed_32ptFontInfo);
-			oled.SetCursor(2, 0);
-			oled.Printf("%i:%.2i.%.2i", min, sec, cs);
-		}
-		else if (min > 0)   //  0:00.00
-		{
-			oled.SetFont(&openSansCondensed_32ptFontInfo);
-			oled.SetCursor(20, 0);
-			oled.Printf("%i:%.2i.%.2i", min, sec, cs);
-		}
-		else                //    00.00
-		{
-			oled.SetFont(&openSansCondensed_32ptFontInfo);
-			oled.SetCursor(47, 0);
-			oled.Printf("%.2i.%.2i", sec, cs);
-		}
-
-		if (drawStatusIcons)
-		{
-			oled.SetFont(&symbols_FontInfo);
-			oled.SetCursor(0, 0);
-			oled.DrawChar('b' + battery);  // Battery
-			oled.SetCursor(0, 1);
-			oled.DrawChar('s' + signal);   // Signal
-			
-			oled.SetFont(&myriadProCond_6ptFontInfo, 1);
-			oled.SetCursor(0, 3);
-			if (idleTimeRemaining > 60)
-				oled.Printf("Z:%im", idleTimeRemaining / 60 + 1);
+			if (isMaster)
+				oled.PowerOn();
+			break;
+		case EventType::BUTTON_UP:
+			ESP_LOGI("Main", "Button up");
+			lastEventTimeMS = now;
+			buttonDown   = false;
+			buttonTimeMS = event.time;   // Not 'now', because the debounce algorithm can send events from the past
+			if (!isMaster)
+				oled.PowerOn();
+			break;
+		case EventType::TIMER_SEND:
+			if (isMaster)
+				Protocol::Send(timerValueMS, timerRunning);
 			else
-				oled.Printf("Z:%is", idleTimeRemaining);
-		}
-		oled.SendFrame();
+				Protocol::Send(buttonTimeMS, buttonDown);
+			break;
+		case EventType::TIMER_DISPLAY:
+			{
+				const int totalMS     = timerRunning ? (now - timerValueMS) : timerValueMS;
+				const int min         = (totalMS / 60000) % 100;
+				const int sec         = (totalMS / 1000)  % 60;
+				const int cs          = (totalMS / 10)    % 100;    // centiseconds
+				const int battery     = Battery::GetScaled(8);
+				const int signal      = signalEstimate.GetScaled(now, 5);
+				const int idleTimeSec = (now - lastEventTimeMS) / 1000;
+				const int idleTimeRemaining = (timerRunning ? 3600 : 600) - idleTimeSec - 1;
+	
+				bool drawStatusIcons = true;
+				oled.Clear();
+				if (now < 2000)
+				{
+					drawStatusIcons = false;
+					oled.DrawScreen(splashScreenBitmap);
+				}
+				else if (signal == 0 && now % 1000 > 500)
+				{
+					oled.SetFont(&openSansCondensed_11ptFontInfo, 1);
+					oled.SetCursor(48, 1);
+					oled.Print("Not connected!");
+				}
+				else if (min > 9)   // 00:00.00
+				{
+					drawStatusIcons = false;    // Not enough room!
+					oled.SetFont(&openSansCondensed_32ptFontInfo);
+					oled.SetCursor(2, 0);
+					oled.Printf("%i:%.2i.%.2i", min, sec, cs);
+				}
+				else if (min > 0)   //  0:00.00
+				{
+					oled.SetFont(&openSansCondensed_32ptFontInfo);
+					oled.SetCursor(20, 0);
+					oled.Printf("%i:%.2i.%.2i", min, sec, cs);
+				}
+				else                //    00.00
+				{
+					oled.SetFont(&openSansCondensed_32ptFontInfo);
+					oled.SetCursor(47, 0);
+					oled.Printf("%.2i.%.2i", sec, cs);
+				}
 
-		if (idleTimeRemaining < 0)
-		{
-			esp_sleep_enable_ext0_wakeup(GPIO_NUM_32, 0);
-			oled.PowerOff();
-			esp_deep_sleep_start();
-		}
-	}
+				if (drawStatusIcons)
+				{
+					oled.SetFont(&symbols_FontInfo);
+					oled.SetCursor(0, 0);
+					oled.DrawChar('b' + battery);    // Battery
+					oled.SetCursor(0, 1);
+					oled.DrawChar('s' + signal);     // Signal
+			
+					oled.SetFont(&myriadProCond_6ptFontInfo, 1);
+					oled.SetCursor(0, 3);
+					if (idleTimeRemaining > 60)
+						oled.Printf("Z:%im", idleTimeRemaining / 60 + 1);
+					else
+						oled.Printf("Z:%is", idleTimeRemaining);
+				}
+				oled.SendFrame();
+
+				if (idleTimeRemaining < 0)
+				{
+					esp_sleep_enable_ext0_wakeup(GPIO_NUM_32, 0);
+					oled.PowerOff();
+					esp_deep_sleep_start();
+				}
+			}
+			break;
+		}  // switch event.type
+		
+		if(lastTimerRunning != timerRunning)
+			xTimerChangePeriod(displayTimer, timerRunning ? DISPLAY_ACTIVE_TICKS : DISPLAY_IDLE_TICKS, portMAX_DELAY);
+	} // while xQueueReceive
+	
+	ESP_LOGE("Main", "Broke out of main loop!");
 }
 
 
@@ -256,8 +276,10 @@ void app_main()
 	
 	esp_timer_init();
 
-	eventQueue = xQueueCreate(16, sizeof(Event_t));
-	xTaskCreate(taskMain, "Main", 8192, nullptr, 1, &mainTask);
+	eventQueue = xQueueCreate(32, sizeof(Event_t));
+	xTaskCreate(taskMain, "Main", 32768, nullptr, 1, &mainTask);
 	sendTimer = xTimerCreate("Send", SEND_TICKS, pdTRUE, nullptr, onSendTimer);
-	xTimerStart(sendTimer, 0);
+	xTimerStart(sendTimer, portMAX_DELAY);
+	displayTimer = xTimerCreate("Display", DISPLAY_IDLE_TICKS, pdTRUE, nullptr, onDisplayTimer);
+	xTimerStart(displayTimer, portMAX_DELAY);
 }

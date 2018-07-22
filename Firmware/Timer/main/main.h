@@ -10,6 +10,7 @@ enum class EventType
 	RX_RTC,
 	RX_ACK,
 	TIMER_SEND,
+	TIMER_DISPLAY,
 	BUTTON_DOWN,
 	BUTTON_UP,
 };

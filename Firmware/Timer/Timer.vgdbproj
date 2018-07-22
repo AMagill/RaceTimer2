@@ -88,7 +88,7 @@
     <DebugMethod>
       <ID>gdbstub</ID>
       <Configuration xsi:type="com.visualgdb.edp.espxx.settings.gdbstub.esp32">
-        <COMPort>COM11</COMPort>
+        <COMPort>COM12</COMPort>
         <StubBaudRate>74880</StubBaudRate>
         <BootloaderBaudRate>115200</BootloaderBaudRate>
         <BootloaderResetDelay>50</BootloaderResetDelay>

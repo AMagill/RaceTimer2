@@ -13,7 +13,7 @@ static uint32_t      g_lastIntMS  = 0;
 static bool          g_lastState  = false;
 
 
-void buttonISR(void* a_arg)
+static void IRAM_ATTR buttonISR(void* a_arg)
 {
 	BaseType_t xHigherPriorityTaskWoken = false;
 	uint32_t now = esp_timer_get_time() / 1000;
@@ -48,7 +48,7 @@ static void onBounceTimer(TimerHandle_t a_timer)
 		Event_t event;
 		event.type = state ? EventType::BUTTON_DOWN : EventType::BUTTON_UP;
 		event.time = g_lastIntMS;
-		xQueueSend(g_eventQueue, &event, portMAX_DELAY);
+		xQueueSend(g_eventQueue, &event, 0);
 	}
 	g_debouncing = false;
 }
