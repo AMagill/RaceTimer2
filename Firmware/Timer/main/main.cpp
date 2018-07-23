@@ -12,6 +12,7 @@
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_now.h"
+#include "esp_pm.h"
 #include "rom/ets_sys.h"
 #include "rom/crc.h"
 #include "tcpip_adapter.h"
@@ -100,163 +101,164 @@ static void taskMain(void* a_context)
 	Battery::Init();
 	
 	// Main loop
-	Event_t event;
-	while (xQueueReceive(eventQueue, &event, portMAX_DELAY))
+	while (true)
 	{
-		bool lastTimerRunning = timerRunning;
-		uint32_t now = esp_timer_get_time() / 1000;
-		
-		switch (event.type)
+		Event_t event;
+		while (xQueueReceive(eventQueue, &event, portMAX_DELAY))
 		{
-		case EventType::RX_RTC:
-			clockSkew = now - event.time;
-			if (lastRxStateTimeMS > event.time) // Our timestamp for green's last button event is in green's future.  It probably restarted.
-				lastRxStateTimeMS = 0;
-			break;
-		case EventType::RX_ACK:
-			signalEstimate.Push(event.time);
-			break;
-		case EventType::RX_BUTTON_DOWN:
-			if (isMaster)
-			{
-				if (lastRxStateTimeMS != 0 && event.time > lastRxStateTimeMS)
-				{
-					 // The green button's state changed to DOWN.  (First message doesn't count)
-					timerRunning = false;
-					timerValueMS = 0;
-					lastEventTimeMS = now;
-				}
-				lastRxStateTimeMS = event.time;
-			}
-			else  // Slave
-				{
-					timerRunning = true;
-					timerValueMS = event.time + clockSkew;
-				}
-			break;
-		case EventType::RX_BUTTON_UP:
-			if (isMaster)
-			{
-				if (lastRxStateTimeMS != 0 && event.time > lastRxStateTimeMS)
-				{
-					 // The green button's state changed to UP.  (First message doesn't count)
-					timerRunning = true;
-					timerValueMS = now;
-					lastEventTimeMS = now;
-				}
-				lastRxStateTimeMS = event.time;
-			}
-			else  // Slave
-				{
-					if (timerRunning)
-						lastEventTimeMS = now;
-					timerRunning = false;
-					timerValueMS = event.time;
-				}
-			break;
-		case EventType::BUTTON_DOWN:
-			ESP_LOGI("Main", "Button down");
-			lastEventTimeMS = now;
-			buttonDown   = true;
-			buttonTimeMS = event.time;   // Not 'now', because the debounce algorithm can send events from the past
-			if(isMaster && timerRunning)  // Press down stops
-			{
-				timerRunning = false;
-				timerValueMS = buttonTimeMS - timerValueMS;
-			}
-			if (isMaster)
-				oled.PowerOn();
-			break;
-		case EventType::BUTTON_UP:
-			ESP_LOGI("Main", "Button up");
-			lastEventTimeMS = now;
-			buttonDown   = false;
-			buttonTimeMS = event.time;   // Not 'now', because the debounce algorithm can send events from the past
-			if (!isMaster)
-				oled.PowerOn();
-			break;
-		case EventType::TIMER_SEND:
-			if (isMaster)
-				Protocol::Send(timerValueMS, timerRunning);
-			else
-				Protocol::Send(buttonTimeMS, buttonDown);
-			break;
-		case EventType::TIMER_DISPLAY:
-			{
-				const int totalMS     = timerRunning ? (now - timerValueMS) : timerValueMS;
-				const int min         = (totalMS / 60000) % 100;
-				const int sec         = (totalMS / 1000)  % 60;
-				const int cs          = (totalMS / 10)    % 100;    // centiseconds
-				const int battery     = Battery::GetScaled(8);
-				const int signal      = signalEstimate.GetScaled(now, 5);
-				const int idleTimeSec = (now - lastEventTimeMS) / 1000;
-				const int idleTimeRemaining = (timerRunning ? 3600 : 600) - idleTimeSec - 1;
-	
-				bool drawStatusIcons = true;
-				oled.Clear();
-				if (now < 2000)
-				{
-					drawStatusIcons = false;
-					oled.DrawScreen(splashScreenBitmap);
-				}
-				else if (signal == 0 && now % 1000 > 500)
-				{
-					oled.SetFont(&openSansCondensed_11ptFontInfo, 1);
-					oled.SetCursor(48, 1);
-					oled.Print("Not connected!");
-				}
-				else if (min > 9)   // 00:00.00
-				{
-					drawStatusIcons = false;    // Not enough room!
-					oled.SetFont(&openSansCondensed_32ptFontInfo);
-					oled.SetCursor(2, 0);
-					oled.Printf("%i:%.2i.%.2i", min, sec, cs);
-				}
-				else if (min > 0)   //  0:00.00
-				{
-					oled.SetFont(&openSansCondensed_32ptFontInfo);
-					oled.SetCursor(20, 0);
-					oled.Printf("%i:%.2i.%.2i", min, sec, cs);
-				}
-				else                //    00.00
-				{
-					oled.SetFont(&openSansCondensed_32ptFontInfo);
-					oled.SetCursor(47, 0);
-					oled.Printf("%.2i.%.2i", sec, cs);
-				}
-
-				if (drawStatusIcons)
-				{
-					oled.SetFont(&symbols_FontInfo);
-					oled.SetCursor(0, 0);
-					oled.DrawChar('b' + battery);    // Battery
-					oled.SetCursor(0, 1);
-					oled.DrawChar('s' + signal);     // Signal
-			
-					oled.SetFont(&myriadProCond_6ptFontInfo, 1);
-					oled.SetCursor(0, 3);
-					if (idleTimeRemaining > 60)
-						oled.Printf("Z:%im", idleTimeRemaining / 60 + 1);
-					else
-						oled.Printf("Z:%is", idleTimeRemaining);
-				}
-				oled.SendFrame();
-
-				if (idleTimeRemaining < 0)
-				{
-					esp_sleep_enable_ext0_wakeup(GPIO_NUM_32, 0);
-					oled.PowerOff();
-					esp_deep_sleep_start();
-				}
-			}
-			break;
-		}  // switch event.type
+			bool lastTimerRunning = timerRunning;
+			uint32_t now = esp_timer_get_time() / 1000;
 		
-		if(lastTimerRunning != timerRunning)
-			xTimerChangePeriod(displayTimer, timerRunning ? DISPLAY_ACTIVE_TICKS : DISPLAY_IDLE_TICKS, portMAX_DELAY);
-	} // while xQueueReceive
+			switch (event.type)
+			{
+			case EventType::RX_RTC:
+				clockSkew = now - event.time;
+				if (lastRxStateTimeMS > event.time) // Our timestamp for green's last button event is in green's future.  It probably restarted.
+					lastRxStateTimeMS = 0;
+				break;
+			case EventType::RX_ACK:
+				signalEstimate.Push(event.time);
+				break;
+			case EventType::RX_BUTTON_DOWN:
+				if (isMaster)
+				{
+					if (lastRxStateTimeMS != 0 && event.time > lastRxStateTimeMS)
+					{
+						 // The green button's state changed to DOWN.  (First message doesn't count)
+						timerRunning = false;
+						timerValueMS = 0;
+						lastEventTimeMS = now;
+					}
+					lastRxStateTimeMS = event.time;
+				}
+				else  // Slave
+					{
+						timerRunning = true;
+						timerValueMS = event.time + clockSkew;
+					}
+				break;
+			case EventType::RX_BUTTON_UP:
+				if (isMaster)
+				{
+					if (lastRxStateTimeMS != 0 && event.time > lastRxStateTimeMS)
+					{
+						 // The green button's state changed to UP.  (First message doesn't count)
+						timerRunning = true;
+						timerValueMS = now;
+						lastEventTimeMS = now;
+					}
+					lastRxStateTimeMS = event.time;
+				}
+				else  // Slave
+					{
+						if (timerRunning)
+							lastEventTimeMS = now;
+						timerRunning = false;
+						timerValueMS = event.time;
+					}
+				break;
+			case EventType::BUTTON_DOWN:
+				ESP_LOGI("Main", "Button down");
+				lastEventTimeMS = now;
+				buttonDown   = true;
+				buttonTimeMS = event.time;   // Not 'now', because the debounce algorithm can send events from the past
+				if(isMaster && timerRunning)  // Press down stops
+				{
+					timerRunning = false;
+					timerValueMS = buttonTimeMS - timerValueMS;
+				}
+				if (isMaster)
+					oled.PowerOn();
+				break;
+			case EventType::BUTTON_UP:
+				ESP_LOGI("Main", "Button up");
+				lastEventTimeMS = now;
+				buttonDown   = false;
+				buttonTimeMS = event.time;   // Not 'now', because the debounce algorithm can send events from the past
+				if (!isMaster)
+					oled.PowerOn();
+				break;
+			case EventType::TIMER_SEND:
+				if (isMaster)
+					Protocol::Send(timerValueMS, timerRunning);
+				else
+					Protocol::Send(buttonTimeMS, buttonDown);
+				break;
+			case EventType::TIMER_DISPLAY:
+				{
+					const int totalMS     = timerRunning ? (now - timerValueMS) : timerValueMS;
+					const int min         = (totalMS / 60000) % 100;
+					const int sec         = (totalMS / 1000)  % 60;
+					const int cs          = (totalMS / 10)    % 100;    // centiseconds
+					const int battery     = Battery::GetScaled(8);
+					const int signal      = signalEstimate.GetScaled(now, 5);
+					const int idleTimeSec = (now - lastEventTimeMS) / 1000;
+					const int idleTimeRemaining = (timerRunning ? 3600 : 600) - idleTimeSec - 1;
 	
-	ESP_LOGE("Main", "Broke out of main loop!");
+					bool drawStatusIcons = true;
+					oled.Clear();
+					if (now < 2000)
+					{
+						drawStatusIcons = false;
+						oled.DrawScreen(splashScreenBitmap);
+					}
+					else if (signal == 0 && now % 1000 > 500)
+					{
+						oled.SetFont(&openSansCondensed_11ptFontInfo, 1);
+						oled.SetCursor(48, 1);
+						oled.Print("Not connected!");
+					}
+					else if (min > 9)   // 00:00.00
+					{
+						drawStatusIcons = false;    // Not enough room!
+						oled.SetFont(&openSansCondensed_32ptFontInfo);
+						oled.SetCursor(2, 0);
+						oled.Printf("%i:%.2i.%.2i", min, sec, cs);
+					}
+					else if (min > 0)   //  0:00.00
+					{
+						oled.SetFont(&openSansCondensed_32ptFontInfo);
+						oled.SetCursor(20, 0);
+						oled.Printf("%i:%.2i.%.2i", min, sec, cs);
+					}
+					else                //    00.00
+					{
+						oled.SetFont(&openSansCondensed_32ptFontInfo);
+						oled.SetCursor(47, 0);
+						oled.Printf("%.2i.%.2i", sec, cs);
+					}
+
+					if (drawStatusIcons)
+					{
+						oled.SetFont(&symbols_FontInfo);
+						oled.SetCursor(0, 0);
+						oled.DrawChar('b' + battery);    // Battery
+						oled.SetCursor(0, 1);
+						oled.DrawChar('s' + signal);     // Signal
+			
+						oled.SetFont(&myriadProCond_6ptFontInfo, 1);
+						oled.SetCursor(0, 3);
+						if (idleTimeRemaining > 60)
+							oled.Printf("Z:%im", idleTimeRemaining / 60 + 1);
+						else
+							oled.Printf("Z:%is", idleTimeRemaining);
+					}
+					oled.SendFrame();
+
+					if (idleTimeRemaining < 0)
+					{
+						esp_sleep_enable_ext0_wakeup(GPIO_NUM_32, 0);
+						oled.PowerOff();
+						esp_deep_sleep_start();
+					}
+				}
+				break;
+			}  // switch event.type
+		
+			if(lastTimerRunning != timerRunning)
+				xTimerChangePeriod(displayTimer, timerRunning ? DISPLAY_ACTIVE_TICKS : DISPLAY_IDLE_TICKS, portMAX_DELAY);
+		} // while xQueueReceive
+	} // while true
 }
 
 
